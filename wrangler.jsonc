@@ -10,9 +10,7 @@
   "secrets": {
     "required": [
       "B2_APPLICATION_KEY_ID",
-      "B2_APPLICATION_KEY",
-      "B2_ENDPOINT",
-      "BUCKET_NAME"
+      "B2_APPLICATION_KEY"      
     ]
   },
 
