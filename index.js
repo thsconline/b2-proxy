@@ -139,16 +139,19 @@ async function countFragments(env, prefix) {
         })
         .filter(value => value !== null);
 
-    const count = fragments.length ? Math.max(...fragments) + 1 : 0;
-    const bytes = new Uint8Array(4);
-    new DataView(bytes.buffer).setUint32(0, count);
+   const count = fragments.length ? Math.max(...fragments) + 1 : 0;
 
-    return new Response(bytes, {
-        status: 200,
-        headers: {
-            "Content-Type": "application/octet-stream"
-        }
-    });
+	return new Response(
+		JSON.stringify({
+			fragmentCount: count
+		}),
+		{
+			status: 200,
+			headers: {
+				"Content-Type": "application/json"
+			}
+		}
+	);
 }
 
 export default {
