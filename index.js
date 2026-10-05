@@ -15,6 +15,56 @@ const HTTPS_PROTOCOL = "https:";
 const HTTPS_PORT = "443";
 const RANGE_RETRY_ATTEMPTS = 3;
 
+const ALLOWED_ORIGINS = new Set([
+    "https://thsconline.github.io",
+    "https://www.thsconline.net"
+]);
+
+const PDF_CACHE_CONTROL = "public, max-age=3600, s-maxage=86400";
+const COUNT_CACHE_CONTROL = "public, max-age=30, s-maxage=30";
+
+function getCorsHeaders(request) {
+    const origin = request.headers.get("Origin");
+    const headers = new Headers();
+
+    if (origin && ALLOWED_ORIGINS.has(origin)) {
+        headers.set("Access-Control-Allow-Origin", origin);
+        headers.set("Vary", "Origin");
+        headers.set(
+            "Access-Control-Expose-Headers",
+            "Accept-Ranges, Content-Length, Content-Range, Content-Type, ETag, Last-Modified"
+        );
+    }
+
+    return headers;
+}
+
+function addCorsHeaders(response, request) {
+    const headers = new Headers(response.headers);
+    const corsHeaders = getCorsHeaders(request);
+
+    for (const [name, value] of corsHeaders) {
+        headers.set(name, value);
+    }
+
+    return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers
+    });
+}
+
+function addCacheControl(response, cacheControl) {
+    const headers = new Headers(response.headers);
+    headers.set("Cache-Control", cacheControl);
+
+    return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers
+    });
+}
+
 function filterHeaders(headers, env) {
     return new Headers(
         Array.from(headers.entries()).filter(([name]) =>
@@ -139,53 +189,105 @@ async function countFragments(env, prefix) {
         })
         .filter(value => value !== null);
 
-   const count = fragments.length ? Math.max(...fragments) + 1 : 0;
+    const count = fragments.length ? Math.max(...fragments) + 1 : 0;
 
-	return new Response(
-		JSON.stringify({
-			fragmentCount: count
-		}),
-		{
-			status: 200,
-			headers: {
-				"Content-Type": "application/json"
-			}
-		}
-	);
+    return new Response(
+        JSON.stringify({ fragmentCount: count }),
+        {
+            status: 200,
+            headers: {
+                "Content-Type": "application/json; charset=utf-8"
+            }
+        }
+    );
 }
 
 export default {
     async fetch(request, env) {
-        if (request.method !== "GET" && request.method !== "HEAD") {
+        const origin = request.headers.get("Origin");
+
+        if (request.method === "OPTIONS") {
+            if (!origin || !ALLOWED_ORIGINS.has(origin)) {
+                return new Response(null, { status: 403 });
+            }
+
             return new Response(null, {
-                status: 405,
+                status: 204,
                 headers: {
-                    Allow: "GET, HEAD"
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+                    "Access-Control-Allow-Headers": "Range, Content-Type",
+                    "Access-Control-Max-Age": "86400",
+                    "Access-Control-Expose-Headers":
+                        "Accept-Ranges, Content-Length, Content-Range, Content-Type, ETag, Last-Modified",
+                    "Vary": "Origin"
                 }
             });
+        }
+
+        if (request.method !== "GET" && request.method !== "HEAD") {
+            return addCorsHeaders(
+                new Response(null, {
+                    status: 405,
+                    headers: {
+                        Allow: "GET, HEAD, OPTIONS"
+                    }
+                }),
+                request
+            );
+        }
+
+        if (origin && !ALLOWED_ORIGINS.has(origin)) {
+            return new Response(null, { status: 403 });
         }
 
         const url = new URL(request.url);
         const filename = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
 
         if (!filename || filename.includes("..") || filename.includes("/")) {
-            return new Response(null, { status: 400 });
+            return addCorsHeaders(
+                new Response(null, { status: 400 }),
+                request
+            );
         }
 
         if (filename.endsWith(".count")) {
             if (request.method === "HEAD") {
-                return new Response(null, {
+                const response = new Response(null, {
                     status: 200,
                     headers: {
-                        "Content-Type": "application/octet-stream"
+                        "Content-Type": "application/json; charset=utf-8"
                     }
                 });
+
+                return addCorsHeaders(
+                    addCacheControl(response, COUNT_CACHE_CONTROL),
+                    request
+                );
             }
 
             const prefix = filename.slice(0, -".count".length) + ".";
-            return countFragments(env, prefix);
+            const response = await countFragments(env, prefix);
+
+            if (!response.ok) {
+                return addCorsHeaders(response, request);
+            }
+
+            return addCorsHeaders(
+                addCacheControl(response, COUNT_CACHE_CONTROL),
+                request
+            );
         }
 
-        return getB2Object(request, env, filename);
+        const response = await getB2Object(request, env, filename);
+
+        if (!response.ok) {
+            return addCorsHeaders(response, request);
+        }
+
+        return addCorsHeaders(
+            addCacheControl(response, PDF_CACHE_CONTROL),
+            request
+        );
     }
 };
