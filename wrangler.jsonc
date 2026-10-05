@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+
+  "name": "b2-proxy",
+  "main": "index.js",
+
+  "workers_dev": true,
+  "compatibility_date": "2026-10-05",
+
+  "secrets": {
+    "required": [
+      "B2_APPLICATION_KEY_ID",
+      "B2_APPLICATION_KEY",
+      "B2_ENDPOINT",
+      "BUCKET_NAME"
+    ]
+  },
+
+  "vars": {
+    "ALLOW_LIST_BUCKET": false,
+    "RCLONE_DOWNLOAD": false
+  }
+}
