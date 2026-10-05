@@ -17,7 +17,9 @@
   },
 
   "vars": {
+	"B2_ENDPOINT": "s3.us-west-004.backblazeb2.com",
+	"BUCKET_NAME": "thsconline",
     "ALLOW_LIST_BUCKET": false,
-    "RCLONE_DOWNLOAD": false
+    "RCLONE_DOWNLOAD": false,	
   }
 }
