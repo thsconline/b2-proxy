@@ -25,6 +25,7 @@
       "binding": "thsconline",
       "id": "c12902e41bc04b7586a45310ac214dd0"
     },
+  ],
   "observability": {
     "enabled": false,
     "head_sampling_rate": 1,
