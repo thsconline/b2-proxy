@@ -13,6 +13,7 @@ const UNSIGNABLE_HEADERS = [
 
 const HTTPS_PROTOCOL = "https:";
 const HTTPS_PORT = "443";
+
 const RANGE_RETRY_ATTEMPTS = 3;
 
 const ALLOWED_ORIGINS = new Set([
@@ -20,8 +21,10 @@ const ALLOWED_ORIGINS = new Set([
     "https://www.thsconline.net"
 ]);
 
+// Browser cache: 1 hour
+// Cloudflare edge cache: 24 hours
 const PDF_CACHE_CONTROL = "public, max-age=3600, s-maxage=86400";
-const COUNT_CACHE_CONTROL = "public, max-age=30, s-maxage=30";
+const COUNT_CACHE_CONTROL = "public, max-age=3600, s-maxage=86400";
 
 function getCorsHeaders(request) {
     const origin = request.headers.get("Origin");
@@ -71,30 +74,60 @@ function filterHeaders(headers, env) {
             !(
                 UNSIGNABLE_HEADERS.includes(name) ||
                 name.startsWith("cf-") ||
-                ("ALLOWED_HEADERS" in env && !env.ALLOWED_HEADERS.includes(name))
+                ("ALLOWED_HEADERS" in env &&
+                    !env.ALLOWED_HEADERS.includes(name))
             )
         )
     );
 }
 
-function createHeadResponse(response) {
-    return new Response(null, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers
-    });
-}
-
 function createB2Url(env, filename) {
-    const url = new URL(`https://${env.B2_ENDPOINT}/${encodeURIComponent(filename)}`);
+    const url = new URL(
+        `https://${env.B2_ENDPOINT}/${encodeURIComponent(filename)}`
+    );
+
     url.protocol = HTTPS_PROTOCOL;
     url.port = HTTPS_PORT;
     url.hostname = `${env.BUCKET_NAME}.${env.B2_ENDPOINT}`;
+
     return url;
 }
 
+/**
+ * Fetch an actual file from Backblaze B2.
+ *
+ * IMPORTANT:
+ * - Only GET requests reach B2.
+ * - HEAD requests are handled locally.
+ * - No bucket listing.
+ * - No metadata request.
+ * - Range requests are passed directly to B2.
+ */
 async function getB2Object(request, env, filename) {
+    /*
+     * Never make a HEAD request to Backblaze.
+     *
+     * We don't need to inspect the object because the client
+     * should only use GET to download actual files.
+     */
+    if (request.method === "HEAD") {
+        return new Response(null, {
+            status: 200,
+            headers: {
+                "Content-Type": "application/octet-stream",
+                "Accept-Ranges": "bytes",
+                "Cache-Control": PDF_CACHE_CONTROL
+            }
+        });
+    }
+
     const url = createB2Url(env, filename);
+
+    /*
+     * Preserve useful request headers such as Range,
+     * while removing Cloudflare/proxy headers that should
+     * not be signed and forwarded to B2.
+     */
     const headers = filterHeaders(request.headers, env);
 
     const client = new AwsClient({
@@ -103,96 +136,109 @@ async function getB2Object(request, env, filename) {
         service: "s3"
     });
 
-    const originalMethod = request.method;
-
     const signedRequest = await client.sign(url.toString(), {
         method: "GET",
         headers
     });
 
-    if (signedRequest.headers.has("range")) {
-        let attempts = RANGE_RETRY_ATTEMPTS;
-        let response;
+    /*
+     * Actual file download.
+     *
+     * This is the only request made to Backblaze.
+     */
+    let attempts = RANGE_RETRY_ATTEMPTS;
+    let response;
 
-        do {
-            const controller = new AbortController();
+    do {
+        response = await fetch(signedRequest);
 
-            response = await fetch(signedRequest.url, {
-                method: signedRequest.method,
-                headers: signedRequest.headers,
-                signal: controller.signal
-            });
-
-            if (response.headers.has("content-range") || !response.ok) {
-                break;
-            }
-
-            attempts--;
-
-            if (attempts > 0) {
-                controller.abort();
-            }
-        } while (attempts > 0);
-
-        if (originalMethod === "HEAD") {
-            return createHeadResponse(response);
+        /*
+         * For Range requests, make sure B2 actually returned
+         * a partial response.
+         *
+         * If it did not, retry up to RANGE_RETRY_ATTEMPTS.
+         */
+        if (
+            !signedRequest.headers.has("range") ||
+            response.headers.has("content-range") ||
+            !response.ok
+        ) {
+            break;
         }
 
-        return response;
-    }
-
-    const response = await fetch(signedRequest);
-
-    if (originalMethod === "HEAD") {
-        return createHeadResponse(response);
-    }
+        attempts--;
+    } while (attempts > 0);
 
     return response;
 }
 
-async function countFragments(env, prefix) {
-    const url = new URL(`https://${env.B2_ENDPOINT}/`);
-    url.protocol = HTTPS_PROTOCOL;
-    url.port = HTTPS_PORT;
-    url.hostname = `${env.BUCKET_NAME}.${env.B2_ENDPOINT}`;
+/**
+ * Get fragment count from Cloudflare KV.
+ *
+ * KV example:
+ *
+ * Key:
+ *   5348-james-ruse-2026
+ *
+ * Value:
+ *   3
+ *
+ * Request:
+ *   /5348-james-ruse-2026.count
+ *
+ * Response:
+ *   {"fragmentCount":3}
+ */
+async function getFragmentCountFromKV(env, filename) {
+    const key = filename.slice(0, -".count".length);
 
-    url.searchParams.set("list-type", "2");
-    url.searchParams.set("prefix", prefix);
+    /*
+     * `thsconline` is the KV binding name.
+     */
+    const value = await env.thsconline.get(key);
 
-    const client = new AwsClient({
-        accessKeyId: env.B2_APPLICATION_KEY_ID,
-        secretAccessKey: env.B2_APPLICATION_KEY,
-        service: "s3"
-    });
-
-    const signedRequest = await client.sign(url.toString(), {
-        method: "GET"
-    });
-
-    const response = await fetch(signedRequest);
-
-    if (!response.ok) {
-        return response;
+    /*
+     * Missing KV key.
+     *
+     * Return zero rather than querying Backblaze.
+     */
+    if (value === null) {
+        return new Response(
+            JSON.stringify({
+                fragmentCount: 0
+            }),
+            {
+                status: 200,
+                headers: {
+                    "Content-Type": "application/json; charset=utf-8"
+                }
+            }
+        );
     }
 
-    const xml = await response.text();
+    const count = Number(value);
 
-    const keys = [...xml.matchAll(/<Key>(.*?)<\/Key>/g)]
-        .map(match => match[1]);
-
-    const fragments = keys
-        .map(key => {
-            const match = key.match(
-                new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\d+)$`)
-            );
-            return match ? Number(match[1]) : null;
-        })
-        .filter(value => value !== null);
-
-    const count = fragments.length ? Math.max(...fragments) + 1 : 0;
+    /*
+     * Protect against malformed KV values.
+     */
+    if (!Number.isInteger(count) || count < 0) {
+        return new Response(
+            JSON.stringify({
+                error: "Invalid fragment count in KV"
+            }),
+            {
+                status: 500,
+                headers: {
+                    "Content-Type": "application/json; charset=utf-8"
+                }
+            }
+        );
+    }
 
     return new Response(
-        JSON.stringify({ fragmentCount: count }),
+        JSON.stringify({
+            fragmentCount: count
+        }),
         {
             status: 200,
             headers: {
@@ -206,17 +252,24 @@ export default {
     async fetch(request, env) {
         const origin = request.headers.get("Origin");
 
+        /*
+         * CORS preflight.
+         */
         if (request.method === "OPTIONS") {
             if (!origin || !ALLOWED_ORIGINS.has(origin)) {
-                return new Response(null, { status: 403 });
+                return new Response(null, {
+                    status: 403
+                });
             }
 
             return new Response(null, {
                 status: 204,
                 headers: {
                     "Access-Control-Allow-Origin": origin,
-                    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-                    "Access-Control-Allow-Headers": "Range, Content-Type",
+                    "Access-Control-Allow-Methods":
+                        "GET, HEAD, OPTIONS",
+                    "Access-Control-Allow-Headers":
+                        "Range, Content-Type",
                     "Access-Control-Max-Age": "86400",
                     "Access-Control-Expose-Headers":
                         "Accept-Ranges, Content-Length, Content-Range, Content-Type, ETag, Last-Modified",
@@ -225,7 +278,13 @@ export default {
             });
         }
 
-        if (request.method !== "GET" && request.method !== "HEAD") {
+        /*
+         * Only GET and HEAD are allowed.
+         */
+        if (
+            request.method !== "GET" &&
+            request.method !== "HEAD"
+        ) {
             return addCorsHeaders(
                 new Response(null, {
                     status: 405,
@@ -237,56 +296,124 @@ export default {
             );
         }
 
+        /*
+         * Reject unknown origins.
+         */
         if (origin && !ALLOWED_ORIGINS.has(origin)) {
-            return new Response(null, { status: 403 });
+            return new Response(null, {
+                status: 403
+            });
         }
 
         const url = new URL(request.url);
-        const filename = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
 
-        if (!filename || filename.includes("..") || filename.includes("/")) {
+        /*
+         * Convert:
+         *
+         * /5348-james-ruse-2026.0
+         *
+         * into:
+         *
+         * 5348-james-ruse-2026.0
+         */
+        const filename = decodeURIComponent(
+            url.pathname.replace(/^\/+/, "")
+        );
+
+        /*
+         * Prevent path traversal.
+         */
+        if (
+            !filename ||
+            filename.includes("..") ||
+            filename.includes("/")
+        ) {
             return addCorsHeaders(
-                new Response(null, { status: 400 }),
+                new Response(null, {
+                    status: 400
+                }),
                 request
             );
         }
 
+        /*
+         * ============================================================
+         * FRAGMENT COUNT
+         * ============================================================
+         *
+         * .count requests NEVER contact Backblaze.
+         *
+         * They are served exclusively from KV.
+         */
         if (filename.endsWith(".count")) {
+            /*
+             * HEAD is handled locally.
+             * No KV request and no B2 request.
+             */
             if (request.method === "HEAD") {
                 const response = new Response(null, {
                     status: 200,
                     headers: {
-                        "Content-Type": "application/json; charset=utf-8"
+                        "Content-Type":
+                            "application/json; charset=utf-8"
                     }
                 });
 
                 return addCorsHeaders(
-                    addCacheControl(response, COUNT_CACHE_CONTROL),
+                    addCacheControl(
+                        response,
+                        COUNT_CACHE_CONTROL
+                    ),
                     request
                 );
             }
 
-            const prefix = filename.slice(0, -".count".length) + ".";
-            const response = await countFragments(env, prefix);
-
-            if (!response.ok) {
-                return addCorsHeaders(response, request);
-            }
+            /*
+             * GET → KV only.
+             */
+            const response =
+                await getFragmentCountFromKV(
+                    env,
+                    filename
+                );
 
             return addCorsHeaders(
-                addCacheControl(response, COUNT_CACHE_CONTROL),
+                addCacheControl(
+                    response,
+                    COUNT_CACHE_CONTROL
+                ),
                 request
             );
         }
 
-        const response = await getB2Object(request, env, filename);
+        /*
+         * ============================================================
+         * ACTUAL FILE
+         * ============================================================
+         *
+         * Only actual file requests reach B2.
+         *
+         * GET  → B2 GET
+         * HEAD → handled locally
+         */
+        const response = await getB2Object(
+            request,
+            env,
+            filename
+        );
 
         if (!response.ok) {
-            return addCorsHeaders(response, request);
+            return addCorsHeaders(
+                response,
+                request
+            );
         }
 
         return addCorsHeaders(
-            addCacheControl(response, PDF_CACHE_CONTROL),
+            addCacheControl(
+                response,
+                PDF_CACHE_CONTROL
+            ),
             request
         );
     }

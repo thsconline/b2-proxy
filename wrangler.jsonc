@@ -20,4 +20,9 @@
     "ALLOW_LIST_BUCKET": false,
     "RCLONE_DOWNLOAD": false,	
   }
+  "kv_namespaces": [
+    {
+      "binding": "thsconline",
+      "id": "c12902e41bc04b7586a45310ac214dd0"
+    }
 }
