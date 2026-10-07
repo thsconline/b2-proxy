@@ -19,10 +19,29 @@
 	"BUCKET_NAME": "thsconline",
     "ALLOW_LIST_BUCKET": false,
     "RCLONE_DOWNLOAD": false,	
-  }
+  },
   "kv_namespaces": [
     {
       "binding": "thsconline",
       "id": "c12902e41bc04b7586a45310ac214dd0"
+    },
+  "observability": {
+    "enabled": false,
+    "head_sampling_rate": 1,
+    "redact_query_string": false,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 0.6,
+      "invocation_logs": true,
+      "persist": true
+    },
+    "traces": {
+      "enabled": false,
+      "head_sampling_rate": 1,
+      "persist": true
+    },
+    "issues": {
+      "enabled": true
     }
+  }
 }
