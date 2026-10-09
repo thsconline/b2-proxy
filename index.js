@@ -195,25 +195,19 @@ async function getFragmentCountFromKV(env, filename) {
     // Try the exact key first.
     let value = await kv.get(filename);
 
-    if (value === null && filename.endsWith(".count")) {
-        const correctedKey = filename.slice(0, -".count".length);
+	if (value === null) {
+		const legacyKey = `${filename}.count`;
 
-        // Check the corrected key before migrating the legacy key.
-        value = await kv.get(correctedKey);
+		value = await kv.get(legacyKey);
 
-        if (value === null) {
-            // Only the legacy key may exist.
-            const legacyValue = await kv.get(filename);
+		if (value !== null) {
+			// Restore the value under the correct key.
+			await kv.put(filename, value);
 
-            if (legacyValue !== null) {
-                // Copy to the corrected key before deleting the legacy key.
-                await kv.put(correctedKey, legacyValue);
-                await kv.delete(filename);
-
-                value = legacyValue;
-            }
-        }
-    }
+			// Remove the legacy key after the copy succeeds.
+			await kv.delete(legacyKey);
+		}
+	}
 
     // Missing KV key: return zero rather than querying Backblaze.
     if (value === null) {
@@ -379,10 +373,12 @@ export default {
             /*
              * GET → KV only.
              */
+			 
+			const key = filename.slice(0, -".count".length);
             const response =
                 await getFragmentCountFromKV(
                     env,
-                    filename
+                    key
                 );
 
             return addCorsHeaders(
