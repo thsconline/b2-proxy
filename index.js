@@ -190,23 +190,35 @@ async function getB2Object(request, env, filename) {
  *   {"fragmentCount":3}
  */
 async function getFragmentCountFromKV(env, filename) {
-    const key = filename.slice(0, -".count".length);
+    const kv = env.thsconline;
 
-    /*
-     * `thsconline` is the KV binding name.
-     */
-    const value = await env.thsconline.get(key);
+    // Try the exact key first.
+    let value = await kv.get(filename);
 
-    /*
-     * Missing KV key.
-     *
-     * Return zero rather than querying Backblaze.
-     */
+    if (value === null && filename.endsWith(".count")) {
+        const correctedKey = filename.slice(0, -".count".length);
+
+        // Check the corrected key before migrating the legacy key.
+        value = await kv.get(correctedKey);
+
+        if (value === null) {
+            // Only the legacy key may exist.
+            const legacyValue = await kv.get(filename);
+
+            if (legacyValue !== null) {
+                // Copy to the corrected key before deleting the legacy key.
+                await kv.put(correctedKey, legacyValue);
+                await kv.delete(filename);
+
+                value = legacyValue;
+            }
+        }
+    }
+
+    // Missing KV key: return zero rather than querying Backblaze.
     if (value === null) {
         return new Response(
-            JSON.stringify({
-                fragmentCount: 0
-            }),
+            JSON.stringify({ fragmentCount: 0 }),
             {
                 status: 200,
                 headers: {
@@ -218,9 +230,7 @@ async function getFragmentCountFromKV(env, filename) {
 
     const count = Number(value);
 
-    /*
-     * Protect against malformed KV values.
-     */
+    // Protect against malformed KV values.
     if (!Number.isInteger(count) || count < 0) {
         return new Response(
             JSON.stringify({
@@ -236,9 +246,7 @@ async function getFragmentCountFromKV(env, filename) {
     }
 
     return new Response(
-        JSON.stringify({
-            fragmentCount: count
-        }),
+        JSON.stringify({ fragmentCount: count }),
         {
             status: 200,
             headers: {
